@@ -1,0 +1,65 @@
+{
+  "Revision": "0.7.0.0",
+  "Profiles": [
+    {
+      "Tablet": "Wacom CTL-472",
+      "OutputMode": {
+        "Path": "OpenTabletDriver.Desktop.Output.AbsoluteMode",
+        "Settings": [
+          {
+            "Property": "Input",
+            "Value": {
+              "Width": 60,
+              "Height": 33.75,
+              "XPosition": 76,
+              "YPosition": 47.5,
+              "Rotation": 15
+            }
+          },
+          {
+            "Property": "Output",
+            "Value": {
+              "Width": 1920,
+              "Height": 1080,
+              "XPosition": 960,
+              "YPosition": 540
+            }
+          },
+          { "Property": "LockAspectRatio", "Value": true },
+          { "Property": "AreaClipping", "Value": true },
+          { "Property": "AreaLimiting", "Value": true },
+          { "Property": "LockToBounds", "Value": true }
+        ],
+        "Enable": true
+      },
+      "Filters": [],
+      "Bindings": {}
+    },
+    {
+      "Tablet": "Wacom CTL-472",
+      "OutputMode": {
+        "Path": "OpenTabletDriver.Desktop.Output.RelativeMode",
+        "Settings": [],
+        "Enable": true
+      }
+    }
+  ],
+  "Tools": [],
+  "Tablets": {
+    "Wacom CTL-472": {
+      "Name": "Wacom CTL-472",
+      "Specifications": {
+        "Digitizer": {
+          "Width": 152,
+          "Height": 95,
+          "MaxX": 15200,
+          "MaxY": 9500
+        },
+        "Pen": {
+          "MaxPressure": 8191,
+          "ButtonCount": 2
+        }
+      }
+    }
+  }
+}
