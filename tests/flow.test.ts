@@ -61,28 +61,33 @@ describe("calibration flow", () => {
     button(root, "进入全屏并开始").click();
     await Promise.resolve();
 
-    expect(root.textContent).toContain("粗调 1/9");
+    expect(root.textContent).toContain("粗调 1/");
+    expect(root.textContent).toContain("Z / X 击打");
     const stage = root.querySelector<HTMLElement>(".hmos-stage");
     if (!stage) throw new Error("粗调没有舞台");
+    stage.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 80, clientY: 60 }),
+    );
 
-    for (let index = 0; index < 9; index += 1) {
-      stage.dispatchEvent(
-        new PointerEvent("pointerdown", {
-          clientX: 80 + index,
-          clientY: 60 + index,
-        }),
-      );
+    let coarse = 0;
+    while (root.textContent?.includes("粗调") && coarse < 20) {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "z" }));
+      coarse += 1;
     }
     await Promise.resolve();
     expect(root.textContent).toContain("细调 1/");
 
     const fine = root.querySelector<HTMLElement>(".hmos-stage");
     if (!fine) throw new Error("细调没有舞台");
+    fine.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 120, clientY: 90 }),
+    );
     let guard = 0;
     while (!root.textContent?.includes("校准结果") && guard < 40) {
-      fine.dispatchEvent(
-        new PointerEvent("pointerdown", { clientX: 100 + guard, clientY: 80 }),
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "x", repeat: guard === 0 }),
       );
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "x" }));
       guard += 1;
     }
     expect(root.textContent).toContain("校准结果");
@@ -101,7 +106,7 @@ describe("calibration flow", () => {
     const root = boot();
     button(root, "进入全屏并开始").click();
     await Promise.resolve();
-    expect(root.textContent).toContain("粗调 1/9");
+    expect(root.textContent).toContain("粗调 1/");
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     expect(root.textContent).toContain("已中止校准");

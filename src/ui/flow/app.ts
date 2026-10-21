@@ -38,15 +38,24 @@ import {
   type StagePointer,
 } from "../hmos/index.ts";
 import {
+  approachProgress,
+  clampBpm,
+  judgeOffset,
+  noteHitTime,
+  type HitGrade,
+} from "../rhythm.ts";
+import {
   coarseTargets,
   fineTargets,
   type CoarseTarget,
   type FineTarget,
 } from "../sequence.ts";
+import { createMetronome, type Metronome } from "./metronome.ts";
 import { DEFAULT_PRESET_ID, TABLET_PRESETS } from "./presets.ts";
 import { createStage } from "./stage-view.ts";
 
 type Phase = "setup" | "coarse" | "fine" | "result";
+type InputMode = "keys" | "pen";
 
 interface Session {
   tablet: TabletSpec;
@@ -58,7 +67,6 @@ interface Session {
   region: ComfortRegion | null;
 }
 
-const APPROACH_MS = 900;
 const BURST_MS = 280;
 const HIT_RADIUS = 46;
 
@@ -79,6 +87,8 @@ const form = {
   rotation: "0",
   paste: "",
   profileName: "抓握A",
+  bpm: "120",
+  input: "keys" as InputMode,
 };
 
 let stage: StageHandle | null = null;
@@ -86,9 +96,13 @@ let progressWatch: State<number> | null = null;
 let coarsePlan: CoarseTarget[] = [];
 let finePlan: FineTarget[] = [];
 let cursor = 0;
-let shownAt = 0;
-let burst: { x: number; y: number; at: number } | null = null;
+let clockStart = 0;
+let activeBpm = 120;
+let inputMode: InputMode = "keys";
+let pointer: Vec2 | null = null;
+let burst: { x: number; y: number; at: number; grade: HitGrade } | null = null;
 let pendingHits: Vec2[] = [];
+let metronome: Metronome | null = null;
 
 let listening = false;
 
@@ -109,7 +123,9 @@ function resetFlow(): void {
   copied.set("");
   cursor = 0;
   pendingHits = [];
+  pointer = null;
   burst = null;
+  metronome?.stop();
   coarsePlan = [];
   finePlan = [];
   form.preset = DEFAULT_PRESET_ID;
@@ -122,6 +138,8 @@ function resetFlow(): void {
   form.rotation = "0";
   form.paste = "";
   form.profileName = "抓握A";
+  form.bpm = "120";
+  form.input = "keys";
 }
 
 function render(): HTMLElement {
@@ -162,6 +180,14 @@ function setupView(): HTMLElement {
   const centerX = numberField("中心 X mm", form.centerX);
   const centerY = numberField("中心 Y mm", form.centerY);
   const rotation = numberField("旋转（度）", form.rotation);
+  const bpm = numberField("BPM", form.bpm);
+  const input = Select({
+    value: form.input,
+    options: [
+      { value: "keys", label: "Z/X 键盘击打" },
+      { value: "pen", label: "笔触直接点" },
+    ],
+  });
   remember(mapWidth, (value) => {
     form.mapWidth = value;
   });
@@ -176,6 +202,12 @@ function setupView(): HTMLElement {
   });
   remember(rotation, (value) => {
     form.rotation = value;
+  });
+  remember(bpm, (value) => {
+    form.bpm = value;
+  });
+  input.onChange((value) => {
+    form.input = value === "pen" ? "pen" : "keys";
   });
 
   const paste = document.createElement("textarea");
@@ -219,7 +251,7 @@ function setupView(): HTMLElement {
             field("中心 X mm", centerX),
             field("中心 Y mm", centerY),
           ]),
-          field("旋转（度，正值为逆时针）", rotation),
+          field("旋转（度，正值为顺时针）", rotation),
           Divider(),
           Text("粘贴 settings.json").fontSize(14),
           paste,
@@ -249,7 +281,19 @@ function setupView(): HTMLElement {
         Column({ space: 8 }, [
           Text("屏幕").fontWeight("medium"),
           Text(`已检测 ${screen.widthPx} × ${screen.heightPx}`).fontSize(20),
-          Text("校准会铺满这块屏幕，窗口变化时画布会跟着变。")
+          Text("校准会铺满这块屏幕，圈只出在中间的 4:3 playfield 里。")
+            .fontSize(12)
+            .fontColor("var(--hmos-color-text-tertiary)"),
+        ]),
+      ]),
+      Card([
+        Column({ space: 12 }, [
+          Text("打法").fontWeight("medium"),
+          field("输入", input),
+          field("BPM（90–200，默认 120）", bpm),
+          Text(
+            "默认跟拍按 Z 或 X，记下的是按下那一瞬间笔尖的位置。笔触模式才是点在哪记在哪。",
+          )
             .fontSize(12)
             .fontColor("var(--hmos-color-text-tertiary)"),
         ]),
@@ -286,7 +330,11 @@ function captureView(current: "coarse" | "fine"): HTMLElement {
             .fontWeight("medium"),
         ),
         Blank(),
-        Text("Esc 中止")
+        Text(
+          inputMode === "keys"
+            ? "Z / X 击打 · Esc 中止"
+            : "笔触点击 · Esc 中止",
+        )
           .fontSize(14)
           .fontColor("var(--hmos-color-text-secondary)"),
       ]).padding(16),
@@ -494,6 +542,8 @@ function begin(
     return;
   }
   notice.set("");
+  activeBpm = clampBpm(Number(form.bpm));
+  inputMode = form.input;
   const screen = detectScreen();
   session.set({
     tablet,
@@ -507,7 +557,10 @@ function begin(
   coarsePlan = coarseTargets(screen);
   cursor = 0;
   pendingHits = [];
+  pointer = null;
   burst = null;
+  clockStart = performance.now();
+  void startAudio();
   void requestFullScreen();
   phase.set("coarse");
 }
@@ -550,15 +603,19 @@ function fillFromSettings(
 function attachStage(host: HTMLElement, current: "coarse" | "fine"): void {
   if (stage) return;
   const plan = current === "coarse" ? coarsePlan : finePlan;
-  shownAt = performance.now();
   stage = createStage({
     onFrame: (frame) => {
+      metronome?.tick(frame.time);
       const target = plan[cursor];
       if (!target || !frame.ctx) return;
       drawTarget(frame.ctx, frame.width, frame.height, target, frame.time);
     },
-    onPointerDown: (pointer) => {
-      recordHit(current, pointer);
+    onPointerMove: (point) => {
+      pointer = { x: point.x, y: point.y };
+    },
+    onPointerDown: (point) => {
+      pointer = { x: point.x, y: point.y };
+      if (inputMode === "pen") recordHit(current, point, performance.now());
     },
   });
   const surface = stage.element;
@@ -568,15 +625,19 @@ function attachStage(host: HTMLElement, current: "coarse" | "fine"): void {
   stage.start();
 }
 
-function recordHit(current: "coarse" | "fine", pointer: StagePointer): void {
+function recordHit(
+  current: "coarse" | "fine",
+  point: StagePointer | Vec2,
+  at: number,
+): void {
   const plan = current === "coarse" ? coarsePlan : finePlan;
   const target = plan[cursor];
   if (!target) return;
-  burst = { x: pointer.x, y: pointer.y, at: performance.now() };
-  pendingHits.push({ x: pointer.x, y: pointer.y });
+  const due = noteHitTime(clockStart, cursor, activeBpm);
+  burst = { x: point.x, y: point.y, at, grade: judgeOffset(at - due) };
+  pendingHits.push({ x: point.x, y: point.y });
   cursor += 1;
   progressWatch?.set(cursor);
-  shownAt = performance.now();
   if (cursor < plan.length) return;
   if (current === "coarse") startFine();
   else finish();
@@ -595,8 +656,9 @@ function startFine(): void {
   cursor = 0;
   pendingHits = [];
   burst = null;
+  clockStart = performance.now();
+  metronome?.start(activeBpm, clockStart);
   session.set({ ...current, coarseHits: tabletPoints });
-  cursor = 0;
   phase.set("fine");
 }
 
@@ -634,8 +696,9 @@ function drawTarget(
   ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
   ctx.fillRect(0, 0, width, height);
 
-  const progress = clamp((time - shownAt) / APPROACH_MS, 0, 1);
-  const approach = HIT_RADIUS + (1 - easeOut(progress)) * 150;
+  const due = noteHitTime(clockStart, cursor, activeBpm);
+  const progress = approachProgress(time, due, activeBpm);
+  const approach = HIT_RADIUS + (1 - progress) * (HIT_RADIUS * 2.6);
   strokeCircle(
     ctx,
     target.x,
@@ -656,15 +719,23 @@ function drawTarget(
   ctx.fillStyle = "#ffffff";
   ctx.fill();
 
+  if (pointer) {
+    ctx.beginPath();
+    ctx.arc(pointer.x, pointer.y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+  }
+
   if (!burst) return;
   const age = (time - burst.at) / BURST_MS;
   if (age >= 1) return;
+  const color = burst.grade === "great" ? "0, 203, 135" : "255, 196, 0";
   strokeCircle(
     ctx,
     burst.x,
     burst.y,
     12 + age * 42,
-    `rgba(0, 203, 135, ${1 - age})`,
+    `rgba(${color}, ${1 - age})`,
     3,
   );
 }
@@ -685,12 +756,25 @@ function strokeCircle(
 }
 
 function onKeyDown(event: KeyboardEvent): void {
-  if (event.key !== "Escape") return;
   if (phase.value !== "coarse" && phase.value !== "fine") return;
-  releaseStage();
-  void exitFullScreen();
-  notice.set("已中止校准");
-  phase.set("setup");
+  if (event.key === "Escape") {
+    releaseStage();
+    void exitFullScreen();
+    notice.set("已中止校准");
+    phase.set("setup");
+    return;
+  }
+  if (inputMode !== "keys" || event.repeat) return;
+  if (
+    event.key !== "z" &&
+    event.key !== "Z" &&
+    event.key !== "x" &&
+    event.key !== "X"
+  )
+    return;
+  if (!pointer) return;
+  event.preventDefault();
+  recordHit(phase.value, pointer, performance.now());
 }
 
 function backToSetup(): void {
@@ -703,6 +787,13 @@ function releaseStage(): void {
   stage?.dispose();
   stage = null;
   progressWatch = null;
+  metronome?.stop();
+}
+
+async function startAudio(): Promise<void> {
+  metronome ??= createMetronome();
+  await metronome.resume();
+  metronome.start(activeBpm, clockStart);
 }
 
 function saveNamed(
@@ -858,12 +949,4 @@ function createId(): string {
   const cryptoId = globalThis.crypto?.randomUUID?.bind(globalThis.crypto);
   if (cryptoId) return cryptoId();
   return `profile-${Date.now().toString(36)}`;
-}
-
-function easeOut(value: number): number {
-  return 1 - (1 - value) ** 3;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
