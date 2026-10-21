@@ -1,5 +1,8 @@
+import "./ui/hmos/tokens.css";
+import { startApp } from "./ui/flow/app.ts";
+
 const app = document.querySelector<HTMLDivElement>("#app");
 
 if (app) {
-  app.textContent = "ORAT — osu! 映射校准工具";
+  startApp(app);
 }
